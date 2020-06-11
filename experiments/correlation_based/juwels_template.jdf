@@ -1,0 +1,43 @@
+#!/bin/bash
+
+#SBATCH --job-name {jobname}
+#SBATCH --workdir {outputdir}
+#SBATCH --output={outputdir}/{jobname}.e
+#SBATCH --error={outputdir}/{jobname}.e
+#SBATCH --time {wall_clock_limit}
+#SBATCH --ntasks {n_processes}
+#SBATCH --cpus-per-task {n_threads}
+#SBATCH --nodes {n_nodes}
+#SBATCH --exclusive
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user={mail}
+#SBATCH --account={account}
+#SBATCH --partition={partition}
+
+export PYTHONPATH={nest_lib}:$PYTHONPATH
+
+date
+echo `hostname`
+cd {outputdir}
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 0 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 1 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 2 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 3 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 4 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 5 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 6 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 7 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 8 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 9 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 10 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 11 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 12 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 13 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 14 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 15 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 16 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 17 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 18 &
+time srun --ntasks 1 --exclusive --cpus-per-task {n_threads} {python_binary} ./{sim_script} 19 &
+wait
+date

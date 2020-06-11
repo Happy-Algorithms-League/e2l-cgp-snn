@@ -1,0 +1,1 @@
+{"seed": 1235, "n_inputs": 5, "n_outputs": 1, "initial_weight": 5.0, "range_input_rates": [150.0, 850.0], "dt": 0.01, "t_sim_step": 5.0, "t_sim": 10000.0, "do_shift_weights": true, "range_teacher_weights": [-20.0, 20.0], "lr": 1.7, "rho": 0.2, "delta": 1.0, "n_trials_per_individual": 15}

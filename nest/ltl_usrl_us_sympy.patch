@@ -1,0 +1,774 @@
+diff --git a/models/iaf_psc_exp.cpp b/models/iaf_psc_exp.cpp
+index 3224a457a..f11c40faa 100644
+--- a/models/iaf_psc_exp.cpp
++++ b/models/iaf_psc_exp.cpp
+@@ -112,6 +112,7 @@ nest::iaf_psc_exp::Parameters_::get( DictionaryDatum& d ) const
+   def< double >( d, names::t_ref, t_ref_ );
+   def< double >( d, names::rho, rho_ );
+   def< double >( d, names::delta, delta_ );
++  def< bool >( d, "reset_after_spike", do_reset_after_spike_ );
+ }
+ 
+ double
+@@ -176,6 +177,8 @@ nest::iaf_psc_exp::Parameters_::set( const DictionaryDatum& d, Node* node )
+     throw BadProperty( "Width of threshold region must not be negative." );
+   }
+ 
++  updateValue< bool >( d, "reset_after_spike", do_reset_after_spike_ );
++
+   return delta_EL;
+ }
+ 
+@@ -217,6 +220,9 @@ nest::iaf_psc_exp::iaf_psc_exp()
+   , P_()
+   , S_()
+   , B_( *this )
++  , activity_( std::vector< unsigned int >( 0 ) )
++  , u_( std::vector< double >( 0.0 ) )
++  , time_driven_( false )
+ {
+   recordablesMap_.create();
+ }
+@@ -226,6 +232,9 @@ nest::iaf_psc_exp::iaf_psc_exp( const iaf_psc_exp& n )
+   , P_( n.P_ )
+   , S_( n.S_ )
+   , B_( n.B_, *this )
++  , activity_( n.activity_ )
++  , u_( n.u_ )
++  , time_driven_( n.time_driven_ )
+ {
+ }
+ 
+@@ -305,6 +314,15 @@ nest::iaf_psc_exp::calibrate()
+   // since t_ref_ >= 0, this can only fail in error
+   assert( V_.RefractoryCounts_ >= 0 );
+ 
++  if ( time_driven_ )
++  {
++    const size_t buffer_size = kernel().connection_manager.get_min_delay();
++    activity_.resize( buffer_size );
++    reset_activity_();
++    u_.resize( buffer_size );
++    reset_u_();
++  }
++
+   V_.rng_ = kernel().rng_manager.get_rng( get_thread() );
+ }
+ 
+@@ -316,6 +334,12 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
+ 
+   const double h = Time::get_resolution().get_ms();
+ 
++  if ( time_driven_ )
++  {
++    reset_activity_();
++    reset_u_();
++  }
++
+   // evolve from timestep 'from' to timestep 'to' with steps of h each
+   for ( long lag = from; lag < to; ++lag )
+   {
+@@ -346,14 +370,27 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
+     S_.i_syn_ex_ += V_.weighted_spikes_ex_;
+     S_.i_syn_in_ += V_.weighted_spikes_in_;
+ 
++    if ( time_driven_ )
++    {
++      set_u_( lag );
++    }
++
+     if ( ( P_.delta_ < 1e-10 and S_.V_m_ >= P_.Theta_ )                   // deterministic threshold crossing
+       or ( P_.delta_ > 1e-10 and V_.rng_->drand() < phi_() * h * 1e-3 ) ) // stochastic threshold crossing
+     {
+-      S_.r_ref_ = V_.RefractoryCounts_;
+-      S_.V_m_ = P_.V_reset_;
++      if ( P_.do_reset_after_spike_ )
++      {
++        S_.r_ref_ = V_.RefractoryCounts_;
++        S_.V_m_ = P_.V_reset_;
++      }
+ 
+       set_spiketime( Time::step( origin.get_steps() + lag + 1 ) );
+ 
++      if ( time_driven_ )
++      {
++        set_activity_( lag );
++      }
++
+       SpikeEvent se;
+       kernel().event_delivery_manager.send( *this, se, lag );
+     }
+@@ -365,6 +402,13 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
+     // log state data
+     B_.logger_.record_data( origin.get_steps() + lag );
+   }
++
++  if ( time_driven_ )
++  {
++    TimeDrivenSpikeEvent e;
++    e.set_coeffarray( activity_ );
++    kernel().event_delivery_manager.send_secondary( *this, e );
++  }
+ }
+ 
+ void
+@@ -408,3 +452,32 @@ nest::iaf_psc_exp::handle( DataLoggingRequest& e )
+ {
+   B_.logger_.handle( e );
+ }
++
++void
++nest::iaf_psc_exp::handle( TimeDrivenSpikeEvent& e )
++{
++  assert( e.get_delay_steps() > 0 );
++  assert( time_driven_ );
++
++  const delay d = e.get_delay_steps();
++
++  size_t lag = 0;
++  std::vector< unsigned int >::iterator it = e.begin();
++  // The call to get_coeffvalue( it ) in this loop also advances the iterator it
++  while ( it != e.end() )
++  {
++    const unsigned int v = e.get_coeffvalue( it );
++    if ( v > 0 )
++    {
++      if ( e.get_weight() >= 0.0 )
++      {
++        B_.spikes_ex_.add_value( d + lag, e.get_weight() );
++      }
++      else
++      {
++        B_.spikes_in_.add_value( d + lag, e.get_weight() );
++      }
++    }
++    ++lag;
++  }
++}
+diff --git a/models/iaf_psc_exp.h b/models/iaf_psc_exp.h
+index ca1de997d..be4d52e3e 100644
+--- a/models/iaf_psc_exp.h
++++ b/models/iaf_psc_exp.h
+@@ -167,20 +167,36 @@ public:
+    */
+   using Node::handle;
+   using Node::handles_test_event;
++  using Node::sends_secondary_event;
+ 
+   port send_test_event( Node&, rport, synindex, bool );
+ 
+   void handle( SpikeEvent& );
+   void handle( CurrentEvent& );
+   void handle( DataLoggingRequest& );
++  void handle( TimeDrivenSpikeEvent& );
+ 
+   port handles_test_event( SpikeEvent&, rport );
+   port handles_test_event( CurrentEvent&, rport );
+   port handles_test_event( DataLoggingRequest&, rport );
++  port handles_test_event( TimeDrivenSpikeEvent&, rport );
++
++  void
++  sends_secondary_event( TimeDrivenSpikeEvent& )
++  {
++    if ( not time_driven_ )
++    {
++      throw IllegalConnection( "Sending node is not in time-driven mode." );
++    }
++  }
+ 
+   void get_status( DictionaryDatum& ) const;
+   void set_status( const DictionaryDatum& );
+ 
++  unsigned int get_activity( const size_t lag ) const override;
++  double get_u( const size_t lag ) const override;
++  double get_u_target( const size_t lag ) const override;
++
+ private:
+   void init_state_( const Node& proto );
+   void init_buffers_();
+@@ -188,6 +204,12 @@ private:
+ 
+   void update( const Time&, const long, const long );
+ 
++  void reset_activity_();
++  void set_activity_( const size_t lag );
++
++  void reset_u_();
++  void set_u_( const size_t lag );
++
+   // intensity function
+   double phi_() const;
+ 
+@@ -236,6 +258,8 @@ private:
+     /** Width of threshold region in mV. **/
+     double delta_;
+ 
++    bool do_reset_after_spike_;
++
+     Parameters_(); //!< Sets default parameter values
+ 
+     void get( DictionaryDatum& ) const; //!< Store current values in dictionary
+@@ -375,6 +399,11 @@ private:
+ 
+   //! Mapping of recordables names to access functions
+   static RecordablesMap< iaf_psc_exp > recordablesMap_;
++
++  std::vector< unsigned int > activity_;
++  std::vector< double > u_;
++  double u_target_;
++  bool time_driven_;
+ };
+ 
+ 
+@@ -383,7 +412,18 @@ nest::iaf_psc_exp::send_test_event( Node& target, rport receptor_type, synindex,
+ {
+   SpikeEvent e;
+   e.set_sender( *this );
+-  return target.handles_test_event( e, receptor_type );
++  const bool target_handles_spike_event = target.handles_test_event( e, receptor_type );
++
++  if ( time_driven_ )
++  {
++    TimeDrivenSpikeEvent tse;
++    tse.set_sender( *this );
++    return target_handles_spike_event or target.handles_test_event( tse, receptor_type );
++  }
++  else
++  {
++    return target_handles_spike_event;
++  }
+ }
+ 
+ inline port
+@@ -423,6 +463,16 @@ iaf_psc_exp::handles_test_event( DataLoggingRequest& dlr, rport receptor_type )
+   return B_.logger_.connect_logging_device( dlr, recordablesMap_ );
+ }
+ 
++inline port
++iaf_psc_exp::handles_test_event( TimeDrivenSpikeEvent&, rport receptor_type )
++{
++  if ( receptor_type != 0 )
++  {
++    throw UnknownReceptorType( receptor_type, get_name() );
++  }
++  return 0;
++}
++
+ inline void
+ iaf_psc_exp::get_status( DictionaryDatum& d ) const
+ {
+@@ -431,6 +481,9 @@ iaf_psc_exp::get_status( DictionaryDatum& d ) const
+   Archiving_Node::get_status( d );
+ 
+   ( *d )[ names::recordables ] = recordablesMap_.get_list();
++
++  def< bool >( d, "time_driven", time_driven_ );
++  def< double >( d, "u_target", u_target_ );
+ }
+ 
+ inline void
+@@ -450,6 +503,55 @@ iaf_psc_exp::set_status( const DictionaryDatum& d )
+   // if we get here, temporaries contain consistent set of properties
+   P_ = ptmp;
+   S_ = stmp;
++
++  updateValue< bool >( d, "time_driven", time_driven_ );
++  updateValue< double >( d, "u_target", u_target_ );
++}
++
++inline void
++iaf_psc_exp::reset_activity_()
++{
++  activity_.assign( activity_.size(), 0 );
++}
++
++inline void
++iaf_psc_exp::set_activity_( const size_t lag )
++{
++  assert( static_cast< size_t>( lag ) < activity_.size() );
++  activity_[ lag ] = 1;
++}
++
++inline unsigned int
++iaf_psc_exp::get_activity( const size_t lag ) const
++{
++  return activity_[ lag ];
++}
++
++inline void
++iaf_psc_exp::reset_u_()
++{
++  u_.assign( u_.size(), P_.E_L_ );
++}
++
++inline void
++iaf_psc_exp::set_u_( const size_t lag )
++{
++  assert( static_cast< size_t >( lag ) < u_.size() );
++  u_[ lag ] = P_.E_L_ + S_.V_m_;
++}
++
++inline double
++iaf_psc_exp::get_u( const size_t lag ) const
++{
++  assert( lag < u_.size() );
++  return u_[ lag ];
++}
++
++inline double
++iaf_psc_exp::get_u_target( const size_t ) const
++{
++  // assert( lag < u_.size() );
++  return u_target_;
+ }
+ 
+ inline double
+diff --git a/models/parrot_neuron.cpp b/models/parrot_neuron.cpp
+index 092b0106c..fdd9082f8 100644
+--- a/models/parrot_neuron.cpp
++++ b/models/parrot_neuron.cpp
+@@ -45,6 +45,8 @@ namespace nest
+ 
+ parrot_neuron::parrot_neuron()
+   : Archiving_Node()
++  , activity_( std::vector< unsigned int >( 0 ) )
++  , time_driven_( false )
+ {
+ }
+ 
+@@ -53,6 +55,13 @@ parrot_neuron::init_buffers_()
+ {
+   B_.n_spikes_.clear(); // includes resize
+   Archiving_Node::clear_history();
++
++  if ( time_driven_ )
++  {
++    const size_t buffer_size = kernel().connection_manager.get_min_delay();
++    activity_.resize( buffer_size );
++    reset_activity_();
++  }
+ }
+ 
+ void
+@@ -61,11 +70,22 @@ parrot_neuron::update( Time const& origin, const long from, const long to )
+   assert( to >= 0 && ( delay ) from < kernel().connection_manager.get_min_delay() );
+   assert( from < to );
+ 
++  if ( time_driven_ )
++  {
++    reset_activity_();
++  }
++
+   for ( long lag = from; lag < to; ++lag )
+   {
+     const unsigned long current_spikes_n = static_cast< unsigned long >( B_.n_spikes_.get_value( lag ) );
+     if ( current_spikes_n > 0 )
+     {
++
++      if ( time_driven_ )
++      {
++	set_activity_( lag );
++      }
++
+       // create a new SpikeEvent, set its multiplicity and send it
+       SpikeEvent se;
+       se.set_multiplicity( current_spikes_n );
+@@ -78,6 +98,13 @@ parrot_neuron::update( Time const& origin, const long from, const long to )
+       }
+     }
+   }
++
++  if ( time_driven_ )
++  {
++    TimeDrivenSpikeEvent e;
++    e.set_coeffarray( activity_ );
++    kernel().event_delivery_manager.send_secondary( *this, e );
++  }
+ }
+ 
+ void
+@@ -85,12 +112,14 @@ parrot_neuron::get_status( DictionaryDatum& d ) const
+ {
+   def< double >( d, names::t_spike, get_spiketime_ms() );
+   Archiving_Node::get_status( d );
++  def< bool >( d, "time_driven", time_driven_ );
+ }
+ 
+ void
+ parrot_neuron::set_status( const DictionaryDatum& d )
+ {
+   Archiving_Node::set_status( d );
++  updateValue< bool >( d, "time_driven", time_driven_ );
+ }
+ 
+ void
+diff --git a/models/parrot_neuron.h b/models/parrot_neuron.h
+index bd0326102..6f4edcabf 100644
+--- a/models/parrot_neuron.h
++++ b/models/parrot_neuron.h
+@@ -93,6 +93,7 @@ public:
+   using Node::handles_test_event;
+   using Node::sends_signal;
+   using Node::receives_signal;
++  using Node::sends_secondary_event;
+ 
+   port send_test_event( Node&, rport, synindex, bool );
+   SignalType sends_signal() const;
+@@ -101,6 +102,15 @@ public:
+   void handle( SpikeEvent& );
+   port handles_test_event( SpikeEvent&, rport );
+ 
++  void
++  sends_secondary_event( TimeDrivenSpikeEvent& )
++  {
++    if ( not time_driven_ )
++    {
++      throw IllegalConnection( "Sending node is not in time-driven mode." );
++    }
++  }
++
+   void get_status( DictionaryDatum& ) const;
+   void set_status( const DictionaryDatum& );
+ 
+@@ -117,6 +127,9 @@ private:
+ 
+   void update( Time const&, const long, const long );
+ 
++  void reset_activity_();
++  void set_activity_( const long lag );
++
+   /**
+      Buffers and accumulates the number of incoming spikes per time step;
+      RingBuffer stores doubles; for now the numbers are casted.
+@@ -127,6 +140,8 @@ private:
+   };
+ 
+   Buffers_ B_;
++  std::vector< unsigned int > activity_;
++  bool time_driven_;
+ };
+ 
+ inline port
+@@ -134,8 +149,18 @@ parrot_neuron::send_test_event( Node& target, rport receptor_type, synindex, boo
+ {
+   SpikeEvent e;
+   e.set_sender( *this );
++  const bool target_handles_spike_event = target.handles_test_event( e, receptor_type );
+ 
+-  return target.handles_test_event( e, receptor_type );
++  if ( time_driven_ )
++  {
++    TimeDrivenSpikeEvent tse;
++    tse.set_sender( *this );
++    return target_handles_spike_event or target.handles_test_event( tse, receptor_type );
++  }
++  else
++  {
++    return target_handles_spike_event;
++  }
+ }
+ 
+ inline port
+@@ -165,6 +190,22 @@ parrot_neuron::receives_signal() const
+   return ALL;
+ }
+ 
++inline void
++parrot_neuron::reset_activity_()
++{
++  for ( std::vector< unsigned int >::iterator it = activity_.begin(); it < activity_.end(); ++it )
++  {
++    ( *it ) = 0;
++  }
++}
++
++inline void
++parrot_neuron::set_activity_( const long lag )
++{
++  assert( static_cast< size_t>( lag ) < activity_.size() );
++  activity_[ lag ] = 1;
++}
++
+ } // namespace
+ 
+ #endif // PARROT_NEURON_H
+diff --git a/models/spike_detector.h b/models/spike_detector.h
+index 9b8bc9da5..5baf6f7c2 100644
+--- a/models/spike_detector.h
++++ b/models/spike_detector.h
+@@ -105,6 +105,7 @@ public:
+   void handle( SpikeEvent& );
+ 
+   port handles_test_event( SpikeEvent&, rport );
++  port handles_test_event( TimeDrivenSpikeEvent&, rport );
+ 
+   Type get_type() const;
+   SignalType receives_signal() const;
+@@ -127,6 +128,16 @@ spike_detector::handles_test_event( SpikeEvent&, rport receptor_type )
+   return 0;
+ }
+ 
++inline port
++spike_detector::handles_test_event( TimeDrivenSpikeEvent&, rport receptor_type )
++{
++  if ( receptor_type != 0 )
++  {
++    throw UnknownReceptorType( receptor_type, get_name() );
++  }
++  return 0;
++}
++
+ inline SignalType
+ spike_detector::receives_signal() const
+ {
+diff --git a/nestkernel/archiving_node.h b/nestkernel/archiving_node.h
+index be3d7e224..7e75a4d81 100644
+--- a/nestkernel/archiving_node.h
++++ b/nestkernel/archiving_node.h
+@@ -200,6 +200,10 @@ public:
+    */
+   double get_tau_Ca() const;
+ 
++  virtual unsigned int get_activity( const size_t lag ) const { assert( false ); };
++  virtual double get_u( const size_t lag ) const { assert( false ); };
++  virtual double get_u_target( const size_t lag ) const { assert( false ); };
++
+ protected:
+   /**
+    * \fn void set_spiketime(Time const & t_sp, double offset)
+diff --git a/nestkernel/event.cpp b/nestkernel/event.cpp
+index d28e0fb3a..694c1e271 100644
+--- a/nestkernel/event.cpp
++++ b/nestkernel/event.cpp
+@@ -120,6 +120,12 @@ void DiffusionConnectionEvent::operator()()
+ {
+   receiver_->handle( *this );
+ }
++
++void TimeDrivenSpikeEvent::operator()()
++{
++  receiver_->handle( *this );
++}
++
+ }
+ 
+ nest::index
+diff --git a/nestkernel/event.h b/nestkernel/event.h
+index bc9b920b9..f4da77a33 100644
+--- a/nestkernel/event.h
++++ b/nestkernel/event.h
+@@ -352,6 +352,9 @@ protected:
+ };
+ 
+ 
++class TimeDrivenSpikeEvent;
++
++
+ // Built-in event types
+ /**
+  * Event for spike information.
+@@ -361,6 +364,7 @@ class SpikeEvent : public Event
+ {
+ public:
+   SpikeEvent();
++  SpikeEvent( const TimeDrivenSpikeEvent& e, const size_t lag );
+   void operator()();
+   SpikeEvent* clone() const;
+ 
+@@ -1203,6 +1207,18 @@ public:
+   weight get_diffusion_factor() const;
+ };
+ 
++class TimeDrivenSpikeEvent
++  : public DataSecondaryEvent< unsigned int, TimeDrivenSpikeEvent  >
++{
++public:
++  TimeDrivenSpikeEvent()
++  {
++  }
++
++  void operator()();
++  TimeDrivenSpikeEvent* clone() const;
++};
++
+ template < typename DataType, typename Subclass >
+ inline DataType
+ DataSecondaryEvent< DataType, Subclass >::get_coeffvalue( std::vector< unsigned int >::iterator& pos )
+@@ -1257,6 +1273,23 @@ DiffusionConnectionEvent::get_diffusion_factor() const
+   return diffusion_factor_;
+ }
+ 
++inline TimeDrivenSpikeEvent*
++TimeDrivenSpikeEvent::clone() const
++{
++  return new TimeDrivenSpikeEvent( *this );
++}
++
++inline SpikeEvent::SpikeEvent( const TimeDrivenSpikeEvent& e, const size_t lag )
++  : multiplicity_( 1 )
++{
++  set_stamp( e.get_stamp() + Time::step( lag ) );
++  set_port( e.get_port() );
++  set_weight( e.get_weight() );
++  set_delay_steps( e.get_delay_steps() );
++  set_receiver( e.get_receiver() );
++  set_rport( e.get_rport() );
++}
++
+ //*************************************************************
+ // Inline implementations.
+ 
+diff --git a/nestkernel/genericmodel.h b/nestkernel/genericmodel.h
+index c8ccddad4..d3eead09c 100644
+--- a/nestkernel/genericmodel.h
++++ b/nestkernel/genericmodel.h
+@@ -86,6 +86,8 @@ public:
+ 
+   void sends_secondary_event( DelayedRateConnectionEvent& re );
+ 
++  void sends_secondary_event( TimeDrivenSpikeEvent& re );
++
+   Node const& get_prototype() const;
+ 
+   void set_model_id( int );
+@@ -232,6 +234,14 @@ GenericModel< ElementT >::sends_secondary_event( DelayedRateConnectionEvent& re
+   return proto_.sends_secondary_event( re );
+ }
+ 
++template < typename ElementT >
++inline void
++GenericModel< ElementT >::sends_secondary_event(
++  TimeDrivenSpikeEvent& re )
++{
++  return proto_.sends_secondary_event( re );
++}
++
+ template < typename ElementT >
+ inline nest::SignalType
+ GenericModel< ElementT >::sends_signal() const
+diff --git a/nestkernel/model.h b/nestkernel/model.h
+index 1c3ded51f..f0d217b53 100644
+--- a/nestkernel/model.h
++++ b/nestkernel/model.h
+@@ -159,6 +159,7 @@ public:
+   virtual void sends_secondary_event( InstantaneousRateConnectionEvent& re ) = 0;
+   virtual void sends_secondary_event( DiffusionConnectionEvent& de ) = 0;
+   virtual void sends_secondary_event( DelayedRateConnectionEvent& re ) = 0;
++  virtual void sends_secondary_event( TimeDrivenSpikeEvent& re ) = 0;
+ 
+   /**
+    * Check what type of signal this model is sending.
+diff --git a/nestkernel/node.cpp b/nestkernel/node.cpp
+index e85205448..643e699c9 100644
+--- a/nestkernel/node.cpp
++++ b/nestkernel/node.cpp
+@@ -404,6 +404,12 @@ Node::handle( DelayedRateConnectionEvent& )
+   throw UnexpectedEvent( "The target node does not handle delayed rate input." );
+ }
+ 
++void
++Node::handle( TimeDrivenSpikeEvent& )
++{
++  throw UnexpectedEvent();
++}
++
+ port
+ Node::handles_test_event( DelayedRateConnectionEvent&, rport )
+ {
+@@ -411,12 +417,24 @@ Node::handles_test_event( DelayedRateConnectionEvent&, rport )
+   return invalid_port_;
+ }
+ 
++port
++Node::handles_test_event( TimeDrivenSpikeEvent&, rport )
++{
++  throw IllegalConnection();
++  return invalid_port_;
++}
++
+ void
+ Node::sends_secondary_event( DelayedRateConnectionEvent& )
+ {
+   throw IllegalConnection( "The source node does not support delayed rate output." );
+ }
+ 
++void
++Node::sends_secondary_event( TimeDrivenSpikeEvent& )
++{
++  throw IllegalConnection();
++}
+ 
+ double
+ Node::get_LTD_value( double )
+diff --git a/nestkernel/node.h b/nestkernel/node.h
+index 66f7f42dc..1d1c176fc 100644
+--- a/nestkernel/node.h
++++ b/nestkernel/node.h
+@@ -425,6 +425,7 @@ public:
+   virtual port handles_test_event( InstantaneousRateConnectionEvent&, rport receptor_type );
+   virtual port handles_test_event( DiffusionConnectionEvent&, rport receptor_type );
+   virtual port handles_test_event( DelayedRateConnectionEvent&, rport receptor_type );
++  virtual port handles_test_event( TimeDrivenSpikeEvent&, rport receptor_type );
+ 
+   /**
+    * Required to check, if source neuron may send a SecondaryEvent.
+@@ -462,6 +463,8 @@ public:
+    */
+   virtual void sends_secondary_event( DelayedRateConnectionEvent& re );
+ 
++  virtual void sends_secondary_event( TimeDrivenSpikeEvent& e );
++
+   /**
+    * Register a STDP connection
+    *
+@@ -576,6 +579,8 @@ public:
+    */
+   virtual void handle( DelayedRateConnectionEvent& e );
+ 
++  virtual void handle( TimeDrivenSpikeEvent& e );
++
+   /**
+    * @defgroup SP_functions Structural Plasticity in NEST.
+    * Functions related to accessibility and setup of variables required for
+diff --git a/nestkernel/node_manager.cpp b/nestkernel/node_manager.cpp
+index 129714bf2..a5e5d194a 100644
+--- a/nestkernel/node_manager.cpp
++++ b/nestkernel/node_manager.cpp
+@@ -751,6 +751,7 @@ NodeManager::check_wfr_use()
+   InstantaneousRateConnectionEvent::set_coeff_length( kernel().connection_manager.get_min_delay() );
+   DelayedRateConnectionEvent::set_coeff_length( kernel().connection_manager.get_min_delay() );
+   DiffusionConnectionEvent::set_coeff_length( kernel().connection_manager.get_min_delay() );
++  TimeDrivenSpikeEvent::set_coeff_length( kernel().connection_manager.get_min_delay() );
+ }
+ 
+ void
+diff --git a/nestkernel/proxynode.cpp b/nestkernel/proxynode.cpp
+index 2b8920027..5b6da3838 100644
+--- a/nestkernel/proxynode.cpp
++++ b/nestkernel/proxynode.cpp
+@@ -74,6 +74,12 @@ proxynode::sends_secondary_event( DelayedRateConnectionEvent& re )
+   kernel().model_manager.get_model( get_model_id() )->sends_secondary_event( re );
+ }
+ 
++void
++proxynode::sends_secondary_event( TimeDrivenSpikeEvent& re )
++{
++  kernel().model_manager.get_model( get_model_id() )->sends_secondary_event( re );
++}
++
+ /**
+  * @returns type of signal this node produces
+  * used in check_connection to only connect neurons which send / receive
+diff --git a/nestkernel/proxynode.h b/nestkernel/proxynode.h
+index a9bf33bc9..ff6d01e4a 100644
+--- a/nestkernel/proxynode.h
++++ b/nestkernel/proxynode.h
+@@ -89,6 +89,8 @@ public:
+ 
+   void sends_secondary_event( DelayedRateConnectionEvent& );
+ 
++  void sends_secondary_event( TimeDrivenSpikeEvent& );
++
+   void
+   handle( SpikeEvent& )
+   {

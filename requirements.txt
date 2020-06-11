@@ -1,0 +1,7 @@
+matplotlib ~= 3.1.3
+numpy ~= 1.18.3
+dicthash ~= 0.0.2
+pyx ~= 0.15
+sympy ~= 1.5.1
+seaborn ~= 0.10.0
+hal-cgp == 0.1.0
