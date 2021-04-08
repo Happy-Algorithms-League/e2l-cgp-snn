@@ -14,6 +14,29 @@ This repository is organized as follows:
 - `experiments` contains scripts to perform the described experiments
 - `nest` contains custom synapse models and kernel patches for NEST (required to run the experiments)
 
+# Docker container
+
+The easiest way to reproduce the figures and experiments is to use the Dockerfile in this repository. It a Python interpreter with all dependencies installed and a built NEST with all synapse modules compiled. To use it, do the following:
+
+- Build the Docker container (`docker build .`) and run the container in interactive mode.
+- Reproduce the figures:
+
+  ```bash
+  cd e2l-cgp-snn/figures
+  make all  
+  ```
+- Test the NEST synapse modules:
+  Start a Python console and execute:
+  ```python
+  import nest
+
+  
+  nest.Install('usrl_synapse_module')
+  nest.Install('HomeostaticSTDPmodule')
+  nest.Install('stdp_sympy_synapse_module') 
+  nest.Install('us_sympy_synapse_module') 
+  ```
+
 # Prepare your Python environment
 
 Our scripts rely on a few Python packages that you might need to install. These are specified in `requirements.txt`. You can conveniently install them via pip:
