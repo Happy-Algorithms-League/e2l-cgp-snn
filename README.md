@@ -47,6 +47,7 @@ While in principle the experiments can be performed on a laptop, we would highly
 To be able to perform the experiments yourself you need to first prepare your NEST [2, [www.nest-simulator.org](https://www.nest-simulator.org/)] installation. The simulations rely on a slightly modified NEST version and custom synapse modules. Please follow the steps below to make sure you can execute the simulations in `experiments` successfully.
 
 1. Build [symengine](https://github.com/symengine/symengine) from source following their [installation instructions](https://github.com/symengine/symengine#building-from-source).
+   Make sure to configure the library with `-DBUILD_SHARED_LIBS=ON`(see [cmake options of symengine](https://github.com/symengine/symengine#cmake-options)).
 
 2. Grab NEST from their [git repository](https://github.com/nest/nest-simulator) and checkout the correct version:
    ```bash
